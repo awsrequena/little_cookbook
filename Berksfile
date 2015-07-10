@@ -1,3 +1,3 @@
 source 'https://api.berkshelf.com'
 
-cookbook 'rabbitmq'
+#cookbook 'rabbitmq'
