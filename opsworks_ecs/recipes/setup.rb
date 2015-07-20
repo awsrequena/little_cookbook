@@ -1,57 +1,53 @@
 include_recipe "opsworks_ecs::cleanup"
 
-ruby_block "Check connectivity to ECS backend" do
-  block do
-    connectivity = system("aws ecs --region=#{node["opsworks"]["instance"]["region"]} discover-poll-endpoint --cluster #{node['opsworks_ecs']['ecs_cluster_name']}")
-    Chef::Log.error "ECS endpoint not reachable, bailing out." unless connectivity
-  end
-end
-
-case node[:platform]
-when "ubuntu"
-  file "/etc/apt/sources.list.d/docker.list" do
-    content "deb https://get.docker.com/ubuntu docker main"
-  end
- execute "Import docker repository key" do
-    command "apt-key adv --keyserver hkp://p80.pool.sks-keyservers.net:80 --recv-keys #{node["docker"]["ubuntu"]["fingerprint"]}"
-    retries 5
-   not_if do
-      OpsWorks::ShellOut.shellout("apt-key adv --list-public-keys #{node["docker"]["ubuntu"]["fingerprint"]}") rescue false
-    end
-  end
-  execute "apt-get update"
-  package "lxc-docker"
-  package "linux-image-extra-#{node["os_version"]}"
-  package "linux-image-extra-virtual"
-
-else
-  package "docker"
-  package "ecs-init"
-end
+package "docker"
 
 group "docker" do
   action :create
 end
 
 service "docker" do
-  supports :restart => true, :reload => true, :status => true
-
   action :start
-  notifies :run, "execute[Install the Amazon ECS agent]", :immediately
+end
+
+package "ecs-init" do
+  ignore_failure true
+end
+
+directory "/etc/ecs" do
+  action :create
+  owner "root"
+  mode 0755
+end
+
+template "ecs.config" do
+  path "/etc/ecs/ecs.config"
+  source "ecs.config.erb"
+  owner "root"
+  group "root"
+  mode 0644
+end
+
+service "ecs" do
+  action :start
+
+  ignore_failure true
 end
 
 execute "Install the Amazon ECS agent" do
-  command "sleep 5 && /usr/bin/docker -D run #{node['docker']['ecs-agent']['command']} "
+  command "/usr/bin/docker -D run #{node["docker"]["ecs-agent"]["command"]} "
 
   only_if do
-     ::File.exists?("/usr/bin/docker")
+    ::File.exist?("/usr/bin/docker") && !OpsWorks::ShellOut.shellout("docker ps -a").include?("amazon-ecs-agent")
   end
-
-  action :nothing
 end
 
 ruby_block "Check that the ECS agent is running" do
   block do
-     Chef::Log.error "ECS agent could not start, bailing out." unless `curl -s http://localhost:#{node['docker']['ecs-agent']['port']}/v1/metadata`
+    ecs_agent = OpsWorks::ECSAgent.new(node["docker"]["ecs-agent"]["port"])
+
+    Chef::Application.fatal!("ECS agent could not start.") unless ecs_agent.wait_for_availability
+
+    Chef::Application.fatal!("ECS agent is registered to a different cluster.") unless ecs_agent.cluster == node["opsworks_ecs"]["ecs_cluster_name"]
   end
 end
